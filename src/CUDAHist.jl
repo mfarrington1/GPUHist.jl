@@ -1,7 +1,12 @@
+module CUDAHist
+
+export CUDAHist1D, nentries, sumw2, binerrors, bincounts, binedges, bincenters, integral, atomic_push!, append!, push!, normalize, cumulative, nbins
+
 using CUDA
 using Base.Threads: SpinLock
 using StatsBase
 using Statistics
+using FHist
 
 _sturges(x) = StatsBase.sturges(length(x))
 
@@ -34,7 +39,7 @@ mutable struct CUDAHist1D{T<:Union{Int32, UInt32, Float32}} <: AbstractHistogram
         isnothing(weights) || length(ary[1]) == length(weights) || throw(DimensionMismatch("Data and weights must have the same length"))
 
         binedges = if !isnothing(binedges)
-            binedges
+            CuArray(binedges)
         else
             auto_bins(ary, Val(1); nbins)
         end
@@ -43,6 +48,28 @@ mutable struct CUDAHist1D{T<:Union{Int32, UInt32, Float32}} <: AbstractHistogram
         _fast_bincounts!(h, ary, binedges, weights)
         return h
     end
+
+    function CUDAHist1D(h::Hist1D)
+        binedges = CUDA.CuArray(Vector(FHist.binedges(h)))
+        bincounts = CUDA.CuArray(Vector(FHist.bincounts(h)))
+        sumw2 = CUDA.CuArray(FHist.sumw2(h))
+        nentries = FHist.nentries(h)
+        overflow = h.overflow
+        return CUDAHist1D(; counttype=Float32, binedges, bincounts, sumw2, nentries, overflow)
+    end
+
+    function CUDAHist1D(ary; kws...)
+        CUDAHist1D((ary, ); kws...)
+    end
+end
+
+function Hist1D(h::CUDAHist1D)
+    binedges = Vector(CUDAHist.binedges(h))
+    bincounts = Vector(CUDAHist.bincounts(h))
+    sumw2 = Vector(CUDAHist.sumw2(h))
+    nentries = CUDAHist.nentries(h)
+    overflow = h.overflow
+    return FHist.Hist1D(; binedges, bincounts, sumw2, nentries, overflow)
 end
 
 function auto_bins(ary, ::Val{1}; nbins=nothing)
@@ -90,12 +117,33 @@ This is also equivalent to `integral(hist)^2 / sum(sumw2(hist))`, this is the sa
 """
 effective_entries(h::CUDAHist1D) = abs2(integral(h)) / sum(sumw2(h))
 
+import Base: ==, +, -, *, /
+
 function Base.:(==)(h1::CUDAHist1D, h2::CUDAHist1D)
     bincounts(h1) == bincounts(h2) &&
         binedges(h1) == binedges(h2) &&
         nentries(h1) == nentries(h2) &&
         sumw2(h1) == sumw2(h2) &&
         h1.overflow == h2.overflow
+end
+
+function Base.:(==)(h1::CUDAHist1D, h2::Hist1D)
+        Vector(CUDAHist.bincounts(h1)) == FHist.bincounts(h2) &&
+        Vector(CUDAHist.binedges(h1)) == FHist.binedges(h2) &&
+        Int(CUDAHist.nentries(h1)) == FHist.nentries(h2) &&
+        Vector(CUDAHist.sumw2(h1)) == FHist.sumw2(h2) &&
+        h1.overflow == h2.overflow
+end
+
+for op in (:+, :-)
+    @eval function ($op)(h1::CUDAHist1D, h2::CUDAHist1D)
+        edge1 = h1.binedges
+        edge1 != h2.binedges && throw(DimensionMismatch("Binedges don't match"))
+        h1.overflow != h2.overflow && throw("Can't $op histograms with different overflow settings.")
+        newcounts = broadcast($op, bincounts(h1),  bincounts(h2))
+
+        (CUDAHist1D)(; binedges = copy.(edge1), bincounts = newcounts, sumw2 = sumw2(h1) + sumw2(h2), nentries = nentries(h1) + nentries(h2), overflow = h1.overflow)
+    end
 end
 
 function Base.empty!(h1::CUDAHist1D)
@@ -204,6 +252,77 @@ function Base.append!(h::CUDAHist1D, val::AbstractVector)
     return h
 end
 
+function _cuda_append_kernel!(data::CuDeviceArray{Float32}, 
+    wgt::CuDeviceArray{Float32}, 
+    binedges::CuDeviceArray{Float32}, 
+    bincounts::CuDeviceMatrix{Float32},
+    sumw2::CuDeviceMatrix{Float32},
+    nentries::CuDeviceArray{Int32},
+    overflow::Bool)
+
+    #initialize bincounts to zero
+    for i in 1:length(binedges) - 1
+        @inbounds bincounts[i] = 0.0
+        @inbounds sumw2[i] = 0.0
+    end
+
+    thread_index = (blockIdx().x - 1) * blockDim().x + threadIdx().x
+    stride = gridDim().x * blockDim().x
+    nentries[thread_index] = 0
+
+    for i = thread_index:stride:length(data)
+        for i_bin in 1:length(binedges)-1
+            if data[i] >= binedges[i_bin] && data[i] < binedges[i_bin + 1]
+                @inbounds bincounts[i_bin, thread_index] += wgt[i]
+                @inbounds sumw2[i_bin, thread_index] += wgt[i]^2
+                @inbounds nentries[thread_index] += 1
+                break
+            end
+        end
+
+        if overflow && data[i] > binedges[end]
+            @inbounds bincounts[end, thread_index] += wgt[i]
+            @inbounds sumw2[end, thread_index] += wgt[i]^2
+            @inbounds nentries[thread_index] += 1
+        end
+    end
+    return
+end
+
+function cuda_append!(hist::CUDAHist1D, data::Vector{Float32}, Nthreads::Int; wgt::Vector{Float32}=ones(Float32, length(data)))
+    if length(data) != length(wgt)
+        throw(DimensionMismatch("Data and weights must have the same length"))
+    end
+
+    #Set up arrays for kernel
+    dev = CUDA.device()
+    max_threads = CUDA.attribute(dev, CUDA.DEVICE_ATTRIBUTE_MAX_THREADS_PER_BLOCK)
+    threads_per_block = min(max_threads, Nthreads)
+    blocks = cld(Nthreads, threads_per_block)
+
+
+    data_cu = CuArray(data)
+    wgt_cu = CuArray(wgt)
+    nbins = length(binedges(hist)) - 1
+    bincounts = CUDA.zeros(Float32, nbins, Nthreads)
+    sumw2   = CUDA.zeros(Float32, nbins, Nthreads)
+    nentries = CUDA.zeros(Int32, Nthreads)
+
+    #Launch kernel
+    @cuda threads=threads_per_block blocks=blocks _cuda_append_kernel!(data_cu, wgt_cu, binedges(hist), bincounts, sumw2, nentries, hist.overflow)
+
+    #Wait for all histograms to finish filling
+    CUDA.synchronize()
+
+    #Add up the results of each thread
+    hist.bincounts += vec(sum(bincounts, dims=2))
+    hist.sumw2 += vec(sum(sumw2, dims=2))
+    hist.nentries[] += length(data)
+
+    return
+end
+
+
 Base.broadcastable(h::CUDAHist1D) = Ref(h)
 
 Statistics.mean(h::CUDAHist1D) = Statistics.mean(bincenters(h), Weights(bincounts(h)))
@@ -240,4 +359,6 @@ function cumulative(h::CUDAHist1D; forward=true)
     s2 = sumw2(h)
     s2 .= f(cumsum(f(s2)))
     return h
+end
+
 end
