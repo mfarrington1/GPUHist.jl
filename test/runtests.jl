@@ -3,7 +3,7 @@ using FHist
 using KernelAbstractions
 using CUDA
 using CUDAHist: gpu_bincounts, create_histogram, histogram!, move
-const backend = CUDABackend()
+const backend = isnothing(get(ENV, "CI", nothing)) ? CUDABackend() : CPU()
 
 # fhist = Hist1D(randn(1000))
 # cuda_hist = CUDAHist1D(fhist);
@@ -34,12 +34,34 @@ end
         histogram_rand_baseline = @time Hist1D(rand_input; binedges)
         rand_input = move(backend, rand_input)
         @time begin
-            cu_bcs = gpu_bincounts(rand_input; binedges)
+            cu_bcs = gpu_bincounts(rand_input; binedges, backend)
             KernelAbstractions.synchronize(backend)
         end
 
         @test isapprox(Array(cu_bcs), bincounts(histogram_rand_baseline))
     end
+end
+
+@testset "simple binning" begin
+    rand_input = rand(1:128, 1024 * 2)
+    binedges = 1:4:129
+    hist_ref = Hist1D(rand_input; binedges)
+    rand_input = move(backend, rand_input)
+    cu_bcs = gpu_bincounts(rand_input; binedges, backend)
+    KernelAbstractions.synchronize(backend)
+
+    @test isapprox(Array(cu_bcs), bincounts(hist_ref))
+end
+
+@testset "uniform binning" begin
+    rand_input = rand(1024 * 2)
+    binedges = 0:0.1:1
+    hist_ref = Hist1D(rand_input; binedges)
+    rand_input = move(backend, rand_input)
+    cu_bcs = gpu_bincounts(rand_input; binedges, backend)
+    KernelAbstractions.synchronize(backend)
+
+    @test isapprox(Array(cu_bcs), bincounts(hist_ref))
 end
 
 @testset "histogram tests" begin

@@ -6,7 +6,7 @@ import FHist: Hist1D
 # INCLUDE ROCM
 using KernelAbstractions
 using KernelAbstractions: @atomic, @atomicswap, @atomicreplace
-using CUDA
+import CUDA
 using CUDA.CUDAKernels
 CUDA.allowscalar(false)
 
@@ -22,7 +22,9 @@ end
 # input already on gpu
 function gpu_bincounts(input; sync=false, binedges, blocksize=256, backend = CUDABackend())
     cu_bincounts = KernelAbstractions.zeros(backend, Int, length(binedges) - 1)
-    histogram!(cu_bincounts, input; blocksize)
+    binindexs = naive_binidxs(input, binedges)
+    synchronize(backend)
+    histogram!(cu_bincounts, binindexs; blocksize)
     if sync
         synchronize(backend)
     end
@@ -30,8 +32,8 @@ function gpu_bincounts(input; sync=false, binedges, blocksize=256, backend = CUD
 end
 
 function naive_binidxs(input, binedges)
-    firstr = first(r)
-    invstep = inv(step(r))
+    firstr = first(binedges)
+    invstep = inv(step(binedges))
     cursor = floor.(Int32, (input .- firstr) .* invstep)
     binidxs = cursor .+ 1
 
