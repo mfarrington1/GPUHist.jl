@@ -1,13 +1,17 @@
 name = "CUDAHist"
 uuid = "b88ef80f-2b40-4481-b604-71583ef69ab9"
-authors = ["Michael"]
 version = "0.1.0"
+authors = ["Michael"]
 
 [deps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
 FHist = "68837c9b-b678-4cd5-9925-8a54edc8f695"
+KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+
+[compat]
+KernelAbstractions = "0.9.34"
 
 [extras]
 Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
