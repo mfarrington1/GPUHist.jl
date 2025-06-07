@@ -7,6 +7,7 @@ using Base.Threads: SpinLock
 using StatsBase
 using Statistics
 using FHist
+import FHist: Hist1D
 
 _sturges(x) = StatsBase.sturges(length(x))
 
