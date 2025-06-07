@@ -13,8 +13,7 @@ begin
     wi_cpu = rand(1:128, 512)
     Hist1D(wi_cpu; binedges=1:129)
     wi = move(backend, wi_cpu)
-    wi_h = KernelAbstractions.zeros(backend, Int, 128)
-    histogram!(wi_h, wi)
+    gpu_bincounts(wi; binedges=1:129, backend)
     KernelAbstractions.synchronize(backend)
 end
 
@@ -27,14 +26,31 @@ end
 
 @testset "trivial integer binning" begin
     for N = 0:8
-        rand_input = rand(1:128, 1024 * 2^N)
-
+        rand_input = Float32.(rand(1:128, 1024 * 2^N))
         binedges = 1:129
         @info N
         histogram_rand_baseline = @time Hist1D(rand_input; binedges)
-        rand_input = move(backend, rand_input)
+        cu_input = move(backend, rand_input)
         @time begin
-            cu_bcs = gpu_bincounts(rand_input; binedges, backend)
+            cu_bcs = gpu_bincounts(cu_input; binedges, backend)
+            KernelAbstractions.synchronize(backend)
+        end
+
+        @test isapprox(Array(cu_bcs), bincounts(histogram_rand_baseline))
+    end
+end
+
+@testset "trivial integer binning with weights" begin
+    for N = 0:8
+        rand_input = Float32.(rand(1:128, 1024 * 2^N))
+        rand_weights = Float32.(rand(1024 * 2^N))
+
+        binedges = 1:129
+        histogram_rand_baseline = @time Hist1D(rand_input; weights=rand_weights, binedges)
+        cu_input = move(backend, rand_input)
+        cu_weights = move(backend, rand_weights)
+        @time begin
+            cu_bcs = gpu_bincounts(cu_input; weights=cu_weights, binedges, backend)
             KernelAbstractions.synchronize(backend)
         end
 

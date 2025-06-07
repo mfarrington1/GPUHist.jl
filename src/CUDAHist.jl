@@ -20,11 +20,11 @@ function create_histogram(input)
 end
 
 # input already on gpu
-function gpu_bincounts(input; sync=false, binedges, blocksize=256, backend = CUDABackend())
-    cu_bincounts = KernelAbstractions.zeros(backend, Int, length(binedges) - 1)
+function gpu_bincounts(input; weights=nothing, sync=false, binedges, blocksize=256, backend = CUDABackend())
+    cu_bincounts = KernelAbstractions.zeros(backend, Float32, length(binedges) - 1)
     binindexs = naive_binidxs(input, binedges)
     synchronize(backend)
-    histogram!(cu_bincounts, binindexs; blocksize)
+    histogram!(cu_bincounts, binindexs; weights, blocksize)
     if sync
         synchronize(backend)
     end
@@ -34,30 +34,28 @@ end
 function naive_binidxs(input, binedges)
     firstr = first(binedges)
     invstep = inv(step(binedges))
-    cursor = floor.(Int32, (input .- firstr) .* invstep)
+    cursor = floor.(Int, (input .- firstr) .* invstep)
     binidxs = cursor .+ 1
 
     return binidxs
 end
 
 # This a 1D histogram kernel where the histogramming happens on shmem
-@kernel function histogram_kernel!(histogram_output, input)
-    tid = @index(Global, Linear)
+@kernel function histogram_kernel!(histogram_output, input, weights)
+    gid = @index(Group, Linear)
     lid = @index(Local, Linear)
 
-    @uniform warpsize = Int(32)
-
-    @uniform gs = @groupsize()[1]
+    @uniform gs = prod(@groupsize())
+    tid = (gid - 1) * gs + lid
     @uniform N = length(histogram_output)
 
-    shared_histogram = @localmem Int (gs)
+    shared_histogram = @localmem Float32 (gs)
 
     # This will go through all input elements and assign them to a location in
     # shmem. Note that if there is not enough shem, we create different shmem
     # blocks to write to. For example, if shmem is of size 256, but it's
     # possible to get a value of 312, then we will have 2 separate shmem blocks,
     # one from 1->256, and another from 256->512
-    @uniform max_element = 1
     for min_element in 1:gs:N
 
         # Setting shared_histogram to 0
@@ -70,10 +68,10 @@ end
         end
 
         # Defining bin on shared memory and writing to it if possible
-        bin = input[tid]
+        bin = tid <= length(input) ? input[tid] : 0
         if bin >= min_element && bin < max_element
             bin -= min_element - 1
-            @atomic shared_histogram[bin] += 1
+            @atomic shared_histogram[bin] += isnothing(weights) ? one(Float32) : weights[tid]
         end
 
         @synchronize()
@@ -83,14 +81,16 @@ end
         end
 
     end
-
 end
 
-function histogram!(histogram_output, input; blocksize = 256)
+function histogram!(histogram_output, input; weights=nothing, blocksize = 256)
     backend = get_backend(histogram_output)
     # Need static block size
+    if !isnothing(weights)
+        @assert get_backend(weights) == backend "Weights must be on the same backend as histogram_output"
+    end
     kernel! = histogram_kernel!(backend, (blocksize,))
-    kernel!(histogram_output, input, ndrange = size(input))
+    kernel!(histogram_output, input, weights, ndrange = size(input))
     return
 end
 
