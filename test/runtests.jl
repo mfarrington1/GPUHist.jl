@@ -40,6 +40,22 @@ end
     end
 end
 
+@testset "weird input length" begin
+    for N = [1,2,3,4,10,128, 1000, 10000]
+        rand_input = Float32.(rand(1:128, N))
+        binedges = 1:129
+        @info N
+        histogram_rand_baseline = @time Hist1D(rand_input; binedges)
+        cu_input = move(backend, rand_input)
+        @time begin
+            cu_bcs = gpu_bincounts(cu_input; binedges, backend)
+            KernelAbstractions.synchronize(backend)
+        end
+
+        @test isapprox(Array(cu_bcs), bincounts(histogram_rand_baseline))
+    end
+end
+
 @testset "trivial integer binning with weights" begin
     for N = 0:8
         rand_input = Float32.(rand(1:128, 1024 * 2^N))

@@ -5,7 +5,7 @@ import FHist: Hist1D
 
 # INCLUDE ROCM
 using KernelAbstractions
-using KernelAbstractions: @atomic, @atomicswap, @atomicreplace
+using KernelAbstractions: @atomic, @atomicswap, @atomicreplace, @Const
 import CUDA
 using CUDA.CUDAKernels
 CUDA.allowscalar(false)
@@ -41,7 +41,7 @@ function naive_binidxs(input, binedges)
 end
 
 # This a 1D histogram kernel where the histogramming happens on shmem
-@kernel function histogram_kernel!(histogram_output, input, weights)
+@kernel unsafe_indices = true function histogram_kernel!(histogram_output, @Const(input), @Const(weights))
     gid = @index(Group, Linear)
     lid = @index(Local, Linear)
 
