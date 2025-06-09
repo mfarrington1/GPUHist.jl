@@ -98,8 +98,8 @@ end
 
 @testset "trivial integer binning (1000 bins)" begin
     for N = 0:8
-        rand_input = Float32.(rand(1024 * 2^N))
-        binedges = 0:0.001:1
+        rand_input = Float32.(rand(1024 * 2^N)) .* 10
+        binedges = 0:0.1:100
         hist_ref = Hist1D(rand_input; binedges)
         cu_input = move(backend, rand_input)
         cu_bcs = gpu_bincounts(cu_input; binedges, backend)
