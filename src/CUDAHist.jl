@@ -23,7 +23,7 @@ end
 function gpu_bincounts(input; weights=nothing, sync=false, binedges, blocksize=256, backend=CUDABackend())
     cu_bincounts = KernelAbstractions.zeros(backend, Float32, length(binedges) - 1)
     firstr = Float32(first(binedges))
-    invstep = Float32(inv(step(binedges)))
+    invstep = inv(step(binedges))
     # binindexs = naive_binidxs(input, binedges)
     # synchronize(backend)
     histogram!(cu_bincounts, input, firstr, invstep; weights, blocksize)
