@@ -45,12 +45,10 @@ end
         rand_input = Float32.(rand(1:128, N))
         binedges = 1:129
         @info N
-        histogram_rand_baseline = @time Hist1D(rand_input; binedges)
+        histogram_rand_baseline = Hist1D(rand_input; binedges)
         cu_input = move(backend, rand_input)
-        @time begin
-            cu_bcs = gpu_bincounts(cu_input; binedges, backend)
-            KernelAbstractions.synchronize(backend)
-        end
+        cu_bcs = gpu_bincounts(cu_input; binedges, backend)
+        KernelAbstractions.synchronize(backend)
 
         @test isapprox(Array(cu_bcs), bincounts(histogram_rand_baseline))
     end
@@ -62,13 +60,27 @@ end
         rand_weights = Float32.(rand(1024 * 2^N))
 
         binedges = 1:129
-        histogram_rand_baseline = @time Hist1D(rand_input; weights=rand_weights, binedges)
+        histogram_rand_baseline = Hist1D(rand_input; weights=rand_weights, binedges)
         cu_input = move(backend, rand_input)
         cu_weights = move(backend, rand_weights)
-        @time begin
-            cu_bcs = gpu_bincounts(cu_input; weights=cu_weights, binedges, backend)
-            KernelAbstractions.synchronize(backend)
-        end
+        cu_bcs = gpu_bincounts(cu_input; weights=cu_weights, sharemem=true, binedges, backend)
+        KernelAbstractions.synchronize(backend)
+
+        @test isapprox(Array(cu_bcs), bincounts(histogram_rand_baseline))
+    end
+end
+
+@testset "naive-algo, trivial integer binning with weights" begin
+    for N = 0:8
+        rand_input = Float32.(rand(1:128, 1024 * 2^N))
+        rand_weights = Float32.(rand(1024 * 2^N))
+
+        binedges = 1:129
+        histogram_rand_baseline = Hist1D(rand_input; weights=rand_weights, binedges)
+        cu_input = move(backend, rand_input)
+        cu_weights = move(backend, rand_weights)
+        cu_bcs = gpu_bincounts(cu_input; weights=cu_weights, sharemem=false, binedges, backend)
+        KernelAbstractions.synchronize(backend)
 
         @test isapprox(Array(cu_bcs), bincounts(histogram_rand_baseline))
     end
