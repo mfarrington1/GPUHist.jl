@@ -41,10 +41,9 @@ end
 end
 
 @testset "weird input length" begin
-    for N = [1,2,3,4,10,128, 1000, 10000]
+    for N = [1, 2, 3, 4, 10, 128, 1000, 10000]
         rand_input = Float32.(rand(1:128, N))
         binedges = 1:129
-        @info N
         histogram_rand_baseline = Hist1D(rand_input; binedges)
         cu_input = move(backend, rand_input)
         cu_bcs = gpu_bincounts(cu_input; binedges, backend)
@@ -108,42 +107,16 @@ end
     @test isapprox(Array(cu_bcs), bincounts(hist_ref))
 end
 
-@testset "trivial integer binning (1000 bins)" begin
-    for N = 0:8
-        rand_input = Float32.(rand(1024 * 2^N)) .* 10
-        binedges = 0:0.1:100
-        hist_ref = Hist1D(rand_input; binedges)
-        cu_input = move(backend, rand_input)
-        cu_bcs = gpu_bincounts(cu_input; binedges, backend)
-        KernelAbstractions.synchronize(backend)
+@testset "trivial integer binning (2000 bins)" begin
+    for Nbins = [256, 512, 512*2, 512*3, 512*4, 512*5]
+        for N = 4:8, v2=(true, false)
+            rand_input = Float32.(rand(1024 * 2^N)) .* Nbins
+            binedges = 0:1.0:Nbins
+            hist_ref = Hist1D(rand_input; binedges)
+            cu_input = move(backend, rand_input)
+            cu_bcs = gpu_bincounts(cu_input; blocksize=1024, sync=true, binedges, backend, v2)
 
-        @test isapprox(Array(cu_bcs), bincounts(hist_ref))
+            @test isapprox(Array(cu_bcs), bincounts(hist_ref))
+        end
     end
 end
-
-# @testset "histogram tests" begin
-#     rand_input = [rand(1:128) for i in 1:1000]
-#     linear_input = [i for i in 1:1024]
-#     all_two = [2 for i in 1:512]
-
-#     histogram_rand_baseline = create_histogram(rand_input)
-#     histogram_linear_baseline = create_histogram(linear_input)
-#     histogram_two_baseline = create_histogram(all_two)
-
-#     rand_input = move(backend, rand_input)
-#     linear_input = move(backend, linear_input)
-#     all_two = move(backend, all_two)
-
-#     rand_histogram = KernelAbstractions.zeros(backend, Int, 128)
-#     linear_histogram = KernelAbstractions.zeros(backend, Int, 1024)
-#     two_histogram = KernelAbstractions.zeros(backend, Int, 2)
-
-#     histogram!(rand_histogram, rand_input)
-#     histogram!(linear_histogram, linear_input)
-#     histogram!(two_histogram, all_two)
-#     KernelAbstractions.synchronize(backend)
-
-#     @test isapprox(Array(rand_histogram), histogram_rand_baseline)
-#     @test isapprox(Array(linear_histogram), histogram_linear_baseline)
-#     @test isapprox(Array(two_histogram), histogram_two_baseline)
-# end

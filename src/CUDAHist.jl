@@ -10,30 +10,7 @@ import CUDA
 using CUDA.CUDAKernels
 CUDA.allowscalar(false)
 
-# Function to use as a baseline for CPU metrics
-function create_histogram(input)
-    histogram_output = zeros(Int, maximum(input))
-    for i in input
-        histogram_output[i] += 1
-    end
-    return histogram_output
-end
-
-# input already on gpu
-function gpu_bincounts(input; weights=nothing, sync=false, sharemem=true, binedges, blocksize=256, backend=CUDABackend())
-    cu_bincounts = KernelAbstractions.zeros(backend, Float32, length(binedges) - 1)
-    firstr = Float32(first(binedges))
-    invstep = Float32(inv(step(binedges)))
-    # binindexs = naive_binidxs(input, binedges)
-    # synchronize(backend)
-    histogram!(cu_bincounts, input, firstr, invstep; weights, blocksize, sharemem)
-    if sync
-        synchronize(backend)
-    end
-    return cu_bincounts
-end
-
-@kernel unsafe_indices = true function histogram_naive_kernel!(histogram_output, @Const(input_raw), @Const(weights), @Const(firstr), @Const(invstep))
+@kernel unsafe_indices = true function histogram_naive_kernel!(histogram_output, @Const(output_L), @Const(input_raw), @Const(weights), @Const(firstr), @Const(invstep))
     gid = @index(Group, Linear)
     lid = @index(Local, Linear)
 
@@ -47,8 +24,7 @@ end
     end
 end
 
-# This a 1D histogram kernel where the histogramming happens on shmem
-@kernel unsafe_indices = true function histogram_sharemem_kernel!(histogram_output,
+@kernel unsafe_indices = true function histogram_sharemem_kernel!(histogram_output, @Const(output_L),
     @Const(input_raw), @Const(weights), @Const(firstr), @Const(invstep)
 )
     gid = @index(Group, Linear)
@@ -60,11 +36,12 @@ end
 
     shared_histogram = @localmem eltype(histogram_output) (gs)
 
-    # This will go through all input elements and assign them to a location in
-    # shmem. Note that if there is not enough shem, we create different shmem
-    # blocks to write to. For example, if shmem is of size 256, but it's
-    # possible to get a value of 312, then we will have 2 separate shmem blocks,
-    # one from 1->256, and another from 256->512
+    bin = Int32(0)
+    if tid <= length(input_raw)
+        x = input_raw[tid]
+        cursor = floor(Int32, (x - firstr) * invstep)
+        bin = cursor + Int32(1)
+    end
     min_element = Int32(1)
     while min_element <= N
 
@@ -78,14 +55,9 @@ end
         end
 
         # Defining bin on shared memory and writing to it if possible
-        if tid <= length(input_raw)
-            x = input_raw[tid]
-            cursor = floor(Int32, (x - firstr) * invstep)
-            bin = cursor + Int32(1)
-            if bin >= min_element && bin < max_element
-                bin -= min_element - Int32(1)
-                @atomic shared_histogram[bin] += isnothing(weights) ? one(Float32) : weights[tid]
-            end
+        if bin >= min_element && bin < max_element
+            bin -= min_element - Int32(1)
+            @atomic shared_histogram[bin] += isnothing(weights) ? one(Float32) : weights[tid]
         end
 
         @synchronize()
@@ -98,18 +70,77 @@ end
     end
 end
 
-function histogram!(histogram_output, input, firstr, invstep; sharemem, weights=nothing, blocksize=256)
+@kernel unsafe_indices = true function histogram_sharemem_v2_kernel!(histogram_output, ::Val{N},
+    @Const(input_raw), @Const(weights), @Const(firstr), @Const(invstep)
+) where {N}
+    gid = @index(Group, Linear)
+    lid = @index(Local, Linear)
+
+    @uniform gs = Int32(prod(@groupsize()))
+    tid = (gid - Int32(1)) * gs + lid
+    max_oid = Int32(length(histogram_output))
+
+    shared_histogram = @localmem eltype(histogram_output) (N)
+
+    # Setting shared_histogram to 0
+    min_element = Int32(1)
+    while min_element < N
+        oid = min_element + lid - Int32(1)
+        if oid <= max_oid
+            @inbounds shared_histogram[oid] = Int32(0)
+        end
+        min_element += gs
+    end
+    @synchronize()
+
+    # Defining bin on shared memory and writing to it if possible
+    if tid <= length(input_raw)
+        x = input_raw[tid]
+        cursor = floor(Int32, (x - firstr) * invstep)
+        bin = cursor + Int32(1)
+        if bin >= Int32(1) && bin <= N
+            @atomic shared_histogram[bin] += isnothing(weights) ? one(Float32) : weights[tid]
+        end
+    end
+    @synchronize()
+
+    min_element = Int32(1)
+    while min_element < N
+        oid = min_element + lid - Int32(1)
+        if oid <= max_oid
+            @atomic histogram_output[oid] += shared_histogram[oid]
+        end
+
+        min_element += gs
+    end
+end
+
+# input already on gpu
+function gpu_bincounts(input; weights=nothing, sync=false, sharemem=true, v2=false, binedges, blocksize=256, backend=CUDABackend())
+    cu_bincounts = KernelAbstractions.zeros(backend, Float32, length(binedges) - 1)
+    firstr = Float32(first(binedges))
+    invstep = Float32(inv(step(binedges)))
+    histogram!(cu_bincounts, input, firstr, invstep; weights, blocksize, sharemem, v2)
+    if sync
+        synchronize(backend)
+    end
+    return cu_bincounts
+end
+
+function histogram!(histogram_output, input, firstr, invstep; sharemem, v2, weights=nothing, blocksize=256)
     backend = get_backend(histogram_output)
     # Need static block size
     if !isnothing(weights)
         @assert get_backend(weights) == backend "Weights must be on the same backend as histogram_output"
     end
-    kernel! = if sharemem
+    kernel! = if sharemem && v2
+        histogram_sharemem_v2_kernel!(backend, (blocksize,))
+    elseif sharemem
         histogram_sharemem_kernel!(backend, (blocksize,))
     else
         histogram_naive_kernel!(backend, (blocksize,))
     end
-    kernel!(histogram_output, input, weights, firstr, invstep, ndrange=size(input))
+    kernel!(histogram_output, Val(length(histogram_output)), input, weights, firstr, invstep, ndrange=size(input))
     return
 end
 
