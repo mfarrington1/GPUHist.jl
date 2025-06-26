@@ -2,7 +2,7 @@ using Test
 using FHist
 using KernelAbstractions
 using CUDA
-using CUDAHist: gpu_bincounts, create_histogram, histogram!, move
+using CUDAHist: gpu_bincounts, histogram!, move
 const backend = isnothing(get(ENV, "CI", nothing)) ? CUDABackend() : CPU()
 
 # fhist = Hist1D(randn(1000))
