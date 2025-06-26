@@ -1,32 +1,122 @@
 using Test
 using FHist
-using CUDAHist
+using KernelAbstractions
+using CUDA
+using CUDAHist: gpu_bincounts, histogram!, move
+const backend = isnothing(get(ENV, "CI", nothing)) ? CUDABackend() : CPU()
 
-fhist = Hist1D(randn(1000))
-cuda_hist = CUDAHist1D(fhist);
+# fhist = Hist1D(randn(1000))
+# cuda_hist = CUDAHist1D(fhist);
 
-@testset "Equality Tests" begin
-    @test fhist.overflow == cuda_hist.overflow
-    @test Vector(FHist.binedges(fhist)) == Vector(CUDAHist.binedges(cuda_hist))
-    @test FHist.bincounts(fhist) == Vector(CUDAHist.bincounts(cuda_hist))
-    @test FHist.bincenters(fhist) == Vector(CUDAHist.bincenters(cuda_hist))
-    @test FHist.sumw2(fhist) == Vector(CUDAHist.sumw2(cuda_hist))
-    @test FHist.nentries(fhist) == CUDAHist.nentries(cuda_hist)
-    @test FHist.binerrors(fhist) ≈ Vector(CUDAHist.binerrors(cuda_hist))
-    @test FHist.nbins(fhist) == CUDAHist.nbins(cuda_hist)
-    @test FHist.integral(fhist) == CUDAHist.integral(cuda_hist)
-    @test FHist.mean(fhist) ≈ CUDAHist.mean(cuda_hist)
-    @test FHist.std(fhist) ≈ CUDAHist.std(cuda_hist)
-    @test cuda_hist == fhist
+# warm up
+begin
+    wi_cpu = rand(1:128, 512)
+    Hist1D(wi_cpu; binedges=1:129)
+    wi = move(backend, wi_cpu)
+    gpu_bincounts(wi; binedges=1:129, backend)
+    KernelAbstractions.synchronize(backend)
 end
 
-@testset "Append Tests" begin
-    data = Float32.(randn(1000))
-    FHist.append!(fhist, data)
-    CUDAHist.append!(cuda_hist, data)
-    @test cuda_hist == fhist;
+@testset "basic binning" begin
+    be1 = [0, 1, 4]
+    data1 = [0.5]
 
-    CUDAHist.cuda_append!(cuda_hist, data, 100)
-    FHist.append!(fhist, data)
-    @test cuda_hist == fhist;
+    ref_hist1 = FHist.Hist1D(data1; binedges=be1)
+end
+
+@testset "trivial integer binning" begin
+    for N = 0:8
+        rand_input = Float32.(rand(1:128, 1024 * 2^N))
+        binedges = 1:129
+        @info N
+        histogram_rand_baseline = @time Hist1D(rand_input; binedges)
+        cu_input = move(backend, rand_input)
+        @time begin
+            cu_bcs = gpu_bincounts(cu_input; binedges, backend)
+            KernelAbstractions.synchronize(backend)
+        end
+
+        @test isapprox(Array(cu_bcs), bincounts(histogram_rand_baseline))
+    end
+end
+
+@testset "weird input length" begin
+    for N = [1, 2, 3, 4, 10, 128, 1000, 10000]
+        rand_input = Float32.(rand(1:128, N))
+        binedges = 1:129
+        histogram_rand_baseline = Hist1D(rand_input; binedges)
+        cu_input = move(backend, rand_input)
+        cu_bcs = gpu_bincounts(cu_input; binedges, backend)
+        KernelAbstractions.synchronize(backend)
+
+        @test isapprox(Array(cu_bcs), bincounts(histogram_rand_baseline))
+    end
+end
+
+@testset "trivial integer binning with weights" begin
+    for N = 0:8
+        rand_input = Float32.(rand(1:128, 1024 * 2^N))
+        rand_weights = Float32.(rand(1024 * 2^N))
+
+        binedges = 1:129
+        histogram_rand_baseline = Hist1D(rand_input; weights=rand_weights, binedges)
+        cu_input = move(backend, rand_input)
+        cu_weights = move(backend, rand_weights)
+        cu_bcs = gpu_bincounts(cu_input; weights=cu_weights, sharemem=true, binedges, backend)
+        KernelAbstractions.synchronize(backend)
+
+        @test isapprox(Array(cu_bcs), bincounts(histogram_rand_baseline))
+    end
+end
+
+@testset "naive-algo, trivial integer binning with weights" begin
+    for N = 0:8
+        rand_input = Float32.(rand(1:128, 1024 * 2^N))
+        rand_weights = Float32.(rand(1024 * 2^N))
+
+        binedges = 1:129
+        histogram_rand_baseline = Hist1D(rand_input; weights=rand_weights, binedges)
+        cu_input = move(backend, rand_input)
+        cu_weights = move(backend, rand_weights)
+        cu_bcs = gpu_bincounts(cu_input; weights=cu_weights, sharemem=false, binedges, backend)
+        KernelAbstractions.synchronize(backend)
+
+        @test isapprox(Array(cu_bcs), bincounts(histogram_rand_baseline))
+    end
+end
+
+@testset "simple binning" begin
+    rand_input = rand(1:128, 1024 * 2)
+    binedges = 1:4:129
+    hist_ref = Hist1D(rand_input; binedges)
+    rand_input = move(backend, rand_input)
+    cu_bcs = gpu_bincounts(rand_input; binedges, backend)
+    KernelAbstractions.synchronize(backend)
+
+    @test isapprox(Array(cu_bcs), bincounts(hist_ref))
+end
+
+@testset "uniform binning" begin
+    rand_input = rand(1024 * 2)
+    binedges = 0:0.1:1
+    hist_ref = Hist1D(rand_input; binedges)
+    rand_input = move(backend, rand_input)
+    cu_bcs = gpu_bincounts(rand_input; binedges, backend)
+    KernelAbstractions.synchronize(backend)
+
+    @test isapprox(Array(cu_bcs), bincounts(hist_ref))
+end
+
+@testset "trivial integer binning (2000 bins)" begin
+    for Nbins = [256, 512, 512*2, 512*3, 512*4, 512*5]
+        for N = 4:8, v2=(true, false)
+            rand_input = Float32.(rand(1024 * 2^N)) .* Nbins
+            binedges = 0:1.0:Nbins
+            hist_ref = Hist1D(rand_input; binedges)
+            cu_input = move(backend, rand_input)
+            cu_bcs = gpu_bincounts(cu_input; blocksize=1024, sync=true, binedges, backend, v2)
+
+            @test isapprox(Array(cu_bcs), bincounts(hist_ref))
+        end
+    end
 end
