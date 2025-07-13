@@ -2,7 +2,8 @@ using Test
 using FHist
 using KernelAbstractions
 using CUDA
-using CUDAHist: gpu_bincounts, histogram!, move
+using GPUHist: gpu_bincounts, histogram!, move
+using Random
 const backend = isnothing(get(ENV, "CI", nothing)) ? CUDABackend() : CPU()
 
 # fhist = Hist1D(randn(1000))
@@ -115,6 +116,20 @@ end
             hist_ref = Hist1D(rand_input; binedges)
             cu_input = move(backend, rand_input)
             cu_bcs = gpu_bincounts(cu_input; blocksize=1024, sync=true, binedges, backend, v2)
+
+            @test isapprox(Array(cu_bcs), bincounts(hist_ref))
+        end
+    end
+end
+
+@testset "non-uniform binning" begin
+    for Nbins = [256, 512, 512*2, 512*3, 512*4, 512*5]    
+        for N = 4:8
+            rand_input = Float32.(rand(1024 * 2^N))
+            binedges = Float32.(sort(randperm(1024 * 2^N)[1:Nbins]))
+            hist_ref = Hist1D(rand_input; binedges)
+            cu_input = move(backend, rand_input)
+            cu_bcs = gpu_bincounts(cu_input; blocksize=1024, sync=true, binedges, backend)
 
             @test isapprox(Array(cu_bcs), bincounts(hist_ref))
         end
