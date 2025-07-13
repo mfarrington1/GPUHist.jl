@@ -2,7 +2,7 @@ using Test
 using FHist, BenchmarkTools
 using KernelAbstractions
 using CUDA
-using CUDAHist: gpu_bincounts, move
+using GPUHist: gpu_bincounts, move
 const backend = isnothing(get(ENV, "CI", nothing)) ? CUDABackend() : CPU()
 
 using PythonCall
@@ -115,6 +115,33 @@ for sharemem in (true, false)
     end
 end
 
+for N in binedges_Ls
+    input = rand_inputs[5]
+    weights = rand_weights[5]
+    weights_np = np.array(weights)
+    input_np = np.array(input)
+    binedges = sort(rand(N))
+    sharemem = true
+
+    SUITE["N_bins_scan_non_uniform_binning"]["FHist.jl (CPU)"][N] = @benchmarkable(
+        Hist1D($input; weights=$weights, binedges=$binedges);
+        evals=EVALS,
+        samples=SAMPLES
+    )
+    SUITE["N_bins_scan_non_uniform_binning"]["Numpy (CPU, v2.3.0)"][N] = @benchmarkable(
+    np.histogram(np.array($input); weights=np.array($weights), bins=$binedges);
+        evals=EVALS,
+        samples=SAMPLES
+    )
+
+    for bs in (32, 128, 512, 1024)
+        SUITE["N_bins_scan_non_uniform_binning"]["GPU-blocksize$bs"][N] = @benchmarkable(
+                gpu_bincounts($(move(backend, input)); blocksize=$bs, sync=true, weights=$(move(backend, weights)), backend, v2=false, sharemem=$sharemem, binedges=$binedges);
+                evals=EVALS,
+                samples=SAMPLES
+            )
+    end
+end
 
 results = run(SUITE, verbose=true, seconds=10)
 # BenchmarkTools.save("benchmark_params.json", params(SUITE));
