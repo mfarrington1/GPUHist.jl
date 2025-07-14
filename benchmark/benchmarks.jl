@@ -115,35 +115,47 @@ for sharemem in (true, false)
     end
 end
 
-for N in binedges_Ls
-    input = rand_inputs[5]
-    weights = rand_weights[5]
-    weights_np = np.array(weights)
-    input_np = np.array(input)
-    binedges = sort(rand(N))
-    sharemem = true
-
-    SUITE["N_bins_scan_non_uniform_binning"]["FHist.jl (CPU)"][N] = @benchmarkable(
+for (N, input, weights, input_np, weights_np) in zip(input_Ls, rand_inputs, rand_weights, rannd_inputs_np, rannd_weights_np)
+    binedges = sort(unique(Float32.(rand(L_binedges))))
+    sharemem=true
+    SUITE["N_input_scan_non_uniform_binedges"]["FHist.jl (CPU)"][N] = @benchmarkable(
         Hist1D($input; weights=$weights, binedges=$binedges);
-        evals=EVALS,
-        samples=SAMPLES
-    )
-    SUITE["N_bins_scan_non_uniform_binning"]["Numpy (CPU, v2.3.0)"][N] = @benchmarkable(
-    np.histogram(np.array($input); weights=np.array($weights), bins=$binedges);
         evals=EVALS,
         samples=SAMPLES
     )
 
     for bs in (32, 128, 512, 1024)
-        SUITE["N_bins_scan_non_uniform_binning"]["GPU-blocksize$bs"][N] = @benchmarkable(
-                gpu_bincounts($(move(backend, input)); blocksize=$bs, sync=true, weights=$(move(backend, weights)), backend, v2=false, sharemem=$sharemem, binedges=$binedges);
-                evals=EVALS,
-                samples=SAMPLES
-            )
+        non_uniform_binedges = sort(Float32.(rand(L_binedges)))
+        SUITE["N_input_scan_non_uniform_binedges"]["GPU-blocksize$bs"][N] = @benchmarkable(
+            gpu_bincounts($(move(backend, input)); blocksize=$bs, sync=true, weights=$(move(backend, weights)), backend, sharemem=$sharemem, binedges=$binedges);
+            evals=EVALS,
+            samples=SAMPLES
+        )
+    end
+end
+
+
+for N in binedges_Ls
+    input = rand_inputs[5]
+    weights = rand_weights[5]
+    binedges = sort(unique(Float32.(rand(N))))
+    sharemem = true
+
+    SUITE["N_bins_scan_non_uniform_binedges"]["FHist.jl (CPU)"][N] = @benchmarkable(
+        Hist1D($input; weights=$weights, binedges=$binedges);
+        evals=EVALS,
+        samples=SAMPLES
+    )
+    for bs in (32, 128, 512, 1024)
+        SUITE["N_bins_scan_non_uniform_binedges"]["GPU-blocksize$bs"][N] = @benchmarkable(
+            gpu_bincounts($(move(backend, input)); blocksize=$bs, sync=true, weights=$(move(backend, weights)), v2=true, backend, sharemem=$sharemem, binedges=$binedges);
+            evals=EVALS,
+            samples=SAMPLES
+        )
     end
 end
 
 results = run(SUITE, verbose=true, seconds=10)
 # BenchmarkTools.save("benchmark_params.json", params(SUITE));
-BenchmarkTools.save("benchmark_result_$(L_binedges)bins_all.json", results)
+BenchmarkTools.save("benchmark_result_new_$(L_binedges)bins_all.json", results)
 

@@ -127,11 +127,6 @@ end
     nedges = Int32(length(binedges))
 
     shared_histogram = @localmem eltype(histogram_output) (gs)
-    shared_binedges = @localmem eltype(binedges) (gs)
-
-    # Copying binedges to shared memory
-    @inbounds shared_binedges[lid] = binedges[lid]
-    @synchronize()
 
     bin = Int32(0)
     if tid <= length(input_raw)
@@ -141,9 +136,7 @@ end
         if x < binedges[1] || x ≥ binedges[nedges]
             bin = -Int32(1)  # Set bin to -1 if x is out of bounds
         else
-            while bin ≤ nedges - 1 && !(x ≥ binedges[bin] && x < binedges[bin + Int32(1)])
-                bin += Int32(1)
-            end
+            bin = searchsortedlast(binedges, x)
         end
     end
 
