@@ -171,18 +171,16 @@ end
 # input already on gpu
 function gpu_bincounts(input; weights=nothing, sync=false, sharemem=true, v2=false, binedges, blocksize=256, backend=CUDABackend())
     cu_bincounts = KernelAbstractions.zeros(backend, Float32, length(binedges) - 1)
-    d = diff(binedges)
-    if all(x -> x ≈ d[1], d)
+    if binedges isa AbstractRange
         firstr = Float32(first(binedges))
         invstep = Float32(inv(step(binedges)))
-        histogram!(cu_bincounts, input; firstr, invstep, weights, blocksize, sharemem, v2)
+        histogram!(cu_bincounts, input; binedges=nothing, firstr, invstep, weights, blocksize, sharemem, v2)
     else
-        cu_binedges = move(backend, binedges)
-        histogram!(cu_bincounts, input; binedges=cu_binedges, blocksize, sharemem, v2, weights)
+        histogram!(cu_bincounts, input; binedges, blocksize, sharemem, v2, weights)
     end
 
     if sync
-    synchronize(backend)
+        synchronize(backend)
     end
     return cu_bincounts
 end
@@ -196,7 +194,7 @@ function histogram!(histogram_output, input; binedges=nothing, firstr=nothing, i
     if binedges !== nothing
         kernel! = histogram_sharemem_v3_kernel!(backend, (blocksize))
         kernel!(histogram_output, Val(length(histogram_output)), input, weights, binedges, ndrange=size(input))
-    else 
+    else
         kernel! = if sharemem && v2
             histogram_sharemem_v2_kernel!(backend, (blocksize,))
         elseif sharemem
